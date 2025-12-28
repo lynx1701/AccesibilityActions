@@ -1,4 +1,3 @@
-```yml
 name: Accessibility (pa11y-ci)
 
 on:
@@ -11,7 +10,7 @@ permissions:
 
 jobs:
   pa11y:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
@@ -23,12 +22,12 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Install
+      - name: Install dependencies
         run: npm ci
 
-      # Run pa11y, but never fail the job here.
-      # We capture the exit code so we can show a warning in the summary.
-      - name: Run pa11y (soft-fail)
+      # Run pa11y-ci, but NEVER fail the workflow on this step.
+      # Capture exit code so we can write a warning in the Summary.
+      - name: Run pa11y-ci (soft fail)
         id: pa11y
         run: |
           mkdir -p pa11y
@@ -39,7 +38,7 @@ jobs:
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           set -e
 
-          # Always succeed so artifacts + summary always run
+          # Always succeed so next steps run and workflow stays green
           exit 0
 
       - name: Upload pa11y artifacts (always)
@@ -50,19 +49,18 @@ jobs:
           path: pa11y/
           if-no-files-found: warn
 
-      - name: Write summary (always)
+      - name: Write GitHub Actions Summary
         if: always()
         run: |
           code="${{ steps.pa11y.outputs.exit_code }}"
-          {
-            echo "## ♿️ Pa11y results"
-            echo ""
-            if [ "$code" != "0" ]; then
-              echo "⚠️ Pa11y reported accessibility issues (exit code: **$code**)."
-              echo ""
-              echo "Download the **pa11y-report** artifact to view the JSON/HTML output."
-            else
-              echo "✅ No issues detected."
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-```
+
+          echo "## ♿️ Pa11y CI results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$code" != "0" ]; then
+            echo "⚠️ Pa11y reported accessibility issues (exit code: **$code**)." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Download the **pa11y-report** artifact to view the HTML/JSON report." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "✅ No accessibility issues detected." >> "$GITHUB_STEP_SUMMARY"
+          fi
