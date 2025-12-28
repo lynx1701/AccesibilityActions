@@ -1,6 +1,7 @@
 {
   "scripts": {
-    "test:a11y": "pa11y-ci -c .pa11yci.json"
+    "test:a11y": "pa11y-ci -c .pa11yci.json",
+    "run": "npm run start"
   },
   "devDependencies": {
     "pa11y-ci": "^4.0.1",
