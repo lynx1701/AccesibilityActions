@@ -61,7 +61,6 @@ jobs:
           if [ -z "$SITEMAP" ]; then SITEMAP="${SITEMAP_URL}"; fi
 
           SINGLE="${{ inputs.single_url }}"
-          # allow env override too (useful for ad-hoc debugging)
           if [ -z "$SINGLE" ] && [ -n "${SINGLE_URL:-}" ]; then SINGLE="${SINGLE_URL}"; fi
 
           MAX="${{ inputs.max_urls }}"
@@ -91,7 +90,6 @@ jobs:
             }
           }
 
-          // If a single URL was provided, just write it and exit.
           if (singleUrl) {
             assertHttpUrl(singleUrl);
             fs.writeFileSync("urls.txt", singleUrl + "\n", "utf8");
@@ -121,21 +119,13 @@ jobs:
             const xml = await fetchTextOrGunzip(url);
             const data = parser.parse(xml);
 
-            // urlset
             if (data.urlset && data.urlset.url) {
-              const urls = toArray(data.urlset.url)
-                .map(u => u.loc)
-                .filter(Boolean)
-                .map(String);
+              const urls = toArray(data.urlset.url).map(u => u.loc).filter(Boolean).map(String);
               return { type: "urlset", urls };
             }
 
-            // sitemapindex
             if (data.sitemapindex && data.sitemapindex.sitemap) {
-              const sitemaps = toArray(data.sitemapindex.sitemap)
-                .map(s => s.loc)
-                .filter(Boolean)
-                .map(String);
+              const sitemaps = toArray(data.sitemapindex.sitemap).map(s => s.loc).filter(Boolean).map(String);
               return { type: "index", sitemaps };
             }
 
@@ -178,7 +168,6 @@ jobs:
 
             fs.writeFileSync("urls.txt", out.join("\n") + "\n", "utf8");
             fs.writeFileSync("urls.json", JSON.stringify(out, null, 2), "utf8");
-
             console.log(`Extracted ${out.length} URLs from sitemap`);
           })().catch(err => {
             console.error(err);
@@ -207,7 +196,6 @@ jobs:
           const cfg = {
             defaults: {
               timeout: 60000,
-              // Used by pa11y (puppeteer) under the hood
               chromeLaunchConfig: {
                 args: (process.env.CHROME_FLAGS || "").split(" ").filter(Boolean),
               },
@@ -225,19 +213,41 @@ jobs:
         run: |
           set +e
 
-          # JSON report (stdout -> file, stderr -> log)
+          # JSON
           npx pa11y-ci -c .pa11yci.json --threshold 999999 --reporter json \
             > reports/pa11y/pa11y-report.json \
             2> reports/pa11y/pa11y-json.stderr.log
-          echo $? > reports/pa11y/pa11y-json.exitcode
+          PA11Y_JSON_EXIT=$?
+          echo "$PA11Y_JSON_EXIT" > reports/pa11y/pa11y-json.exitcode
 
-          # HTML report (stdout -> file, stderr -> log)
+          if [ "$PA11Y_JSON_EXIT" -ne 0 ]; then
+            echo "Pa11y JSON exited with code: $PA11Y_JSON_EXIT"
+            if [ -s reports/pa11y/pa11y-json.stderr.log ]; then
+              echo "---- Pa11y JSON stderr (first 200 lines) ----"
+              sed -n '1,200p' reports/pa11y/pa11y-json.stderr.log
+            else
+              echo "---- Pa11y JSON stderr is empty. Showing first 200 lines of stdout file ----"
+              sed -n '1,200p' reports/pa11y/pa11y-report.json || true
+            fi
+          fi
+
+          # HTML
           npx pa11y-ci -c .pa11yci.json --threshold 999999 --reporter pa11y-ci-reporter-html \
             > reports/pa11y/pa11y-report.html \
             2> reports/pa11y/pa11y-html.stderr.log
-          echo $? > reports/pa11y/pa11y-html.exitcode
+          PA11Y_HTML_EXIT=$?
+          echo "$PA11Y_HTML_EXIT" > reports/pa11y/pa11y-html.exitcode
 
-          set -e
+          if [ "$PA11Y_HTML_EXIT" -ne 0 ]; then
+            echo "Pa11y HTML exited with code: $PA11Y_HTML_EXIT"
+            if [ -s reports/pa11y/pa11y-html.stderr.log ]; then
+              echo "---- Pa11y HTML stderr (first 200 lines) ----"
+              sed -n '1,200p' reports/pa11y/pa11y-html.stderr.log
+            else
+              echo "---- Pa11y HTML stderr is empty. (stdout is the HTML report file) ----"
+              echo "HTML report path: reports/pa11y/pa11y-report.html"
+            fi
+          fi
 
           # Never fail the workflow on pa11y (we want the monthly artifact no matter what)
           exit 0
@@ -257,9 +267,7 @@ jobs:
               collect: {
                 url: urls,
                 numberOfRuns: 1,
-                settings: {
-                  chromeFlags
-                }
+                settings: { chromeFlags }
               },
               upload: {
                 target: "filesystem",
@@ -277,81 +285,12 @@ jobs:
       - name: Run Lighthouse CI (HTML + JSON artifacts)
         continue-on-error: true
         run: |
-          # autorun = collect + upload (filesystem)
           npx lhci autorun --config=./lighthouserc.json || true
 
-          # LHCI also generates raw json/html artifacts in .lighthouseci; keep them too if present
           if [ -d ".lighthouseci" ]; then
             mkdir -p reports/lighthouse/raw
             cp -R .lighthouseci/* reports/lighthouse/raw/ || true
           fi
-
-      - name: Build a top-level index.html for easy viewing
-        run: |
-          node <<'NODE'
-          const fs = require("fs");
-          const path = require("path");
-
-          function listHtml(dir) {
-            if (!fs.existsSync(dir)) return [];
-            return fs.readdirSync(dir)
-              .filter(f => f.toLowerCase().endsWith(".html"))
-              .map(f => path.join(dir, f).replace(/\\/g, "/"));
-          }
-
-          const pa11yHtml = "pa11y/pa11y-report.html";
-          const lhciHtml = listHtml("reports/lighthouse")
-            .filter(p => !p.endsWith("index.html"))
-            .map(p => p.replace(/^reports\//, ""));
-
-          const html = `<!doctype html>
-          <html>
-            <head>
-              <meta charset="utf-8" />
-              <meta name="viewport" content="width=device-width, initial-scale=1" />
-              <title>Monthly Reports</title>
-              <style>
-                body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 24px; }
-                h1 { margin: 0 0 12px; }
-                .box { border: 1px solid #ddd; border-radius: 12px; padding: 16px; margin: 16px 0; }
-                a { text-decoration: none; }
-                a:hover { text-decoration: underline; }
-                ul { margin: 8px 0 0 18px; }
-                code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
-              </style>
-            </head>
-            <body>
-              <h1>Monthly Accessibility + Performance Reports</h1>
-
-              <div class="box">
-                <h2>Pa11y</h2>
-                <ul>
-                  <li><a href="${pa11yHtml}">HTML report</a></li>
-                  <li><a href="pa11y/pa11y-report.json">JSON report</a></li>
-                  <li><a href="pa11y/pa11y-json.stderr.log">JSON stderr log</a></li>
-                  <li><a href="pa11y/pa11y-html.stderr.log">HTML stderr log</a></li>
-                </ul>
-              </div>
-
-              <div class="box">
-                <h2>Lighthouse CI</h2>
-                <ul>
-                  <li><a href="lighthouse/manifest.json">manifest.json</a> (maps URLs to report files)</li>
-                  ${lhciHtml.length ? lhciHtml.map(f => `<li><a href="${f}">${f}</a></li>`).join("\n") : "<li>No HTML reports found (LHCI may have failed).</li>"}
-                </ul>
-              </div>
-
-              <div class="box">
-                <h2>Inputs</h2>
-                <ul>
-                  <li><code>urls.txt</code> and <code>urls.json</code> are included in the zip root.</li>
-                </ul>
-              </div>
-            </body>
-          </html>`;
-
-          fs.writeFileSync("reports/index.html", html, "utf8");
-          NODE
 
       - name: Copy URL lists into reports for convenience
         run: |
