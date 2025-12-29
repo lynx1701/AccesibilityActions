@@ -14,10 +14,6 @@ on:
         description: "Single URL to audit (overrides sitemap_url when provided)"
         required: false
         default: ""
-      max_urls:
-        description: "Optional cap for sitemap-based runs (0 = no cap). Ignored when single_url is provided."
-        required: false
-        default: "0"
 
 permissions:
   contents: read
@@ -33,11 +29,9 @@ jobs:
     env:
       # Set your default sitemap here (can be overridden by workflow_dispatch input)
       SITEMAP_URL: "https://example.com/sitemap.xml"
-      # Optional global cap (can be overridden by workflow_dispatch input)
-      MAX_URLS: "0"
 
-      # Puppeteer/Chrome sandbox flags (fixes the common "No usable sandbox" crash on GitHub runners)
-      CHROME_FLAGS: "--no-sandbox --disable-setuid-sandbox"
+      # Puppeteer/Chrome flags for GitHub runners
+      CHROME_FLAGS: "--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage"
 
     steps:
       - name: Checkout
@@ -63,12 +57,8 @@ jobs:
           SINGLE="${{ inputs.single_url }}"
           if [ -z "$SINGLE" ] && [ -n "${SINGLE_URL:-}" ]; then SINGLE="${SINGLE_URL}"; fi
 
-          MAX="${{ inputs.max_urls }}"
-          if [ -z "$MAX" ]; then MAX="${MAX_URLS}"; fi
-
           echo "sitemap=$SITEMAP" >> $GITHUB_OUTPUT
           echo "single_url=$SINGLE" >> $GITHUB_OUTPUT
-          echo "max_urls=$MAX" >> $GITHUB_OUTPUT
 
       - name: Build URL list (sitemap or single url) -> urls.txt
         run: |
@@ -79,7 +69,6 @@ jobs:
 
           const sitemapUrl = process.env.SITEMAP_URL_EFFECTIVE || "";
           const singleUrl = (process.env.SINGLE_URL_EFFECTIVE || "").trim();
-          const maxUrls = Number(process.env.MAX_URLS_EFFECTIVE || "0");
 
           function assertHttpUrl(u) {
             try {
@@ -138,29 +127,26 @@ jobs:
             const seen = new Set();
             const out = [];
 
-            async function addUrls(urls) {
+            function addUrls(urls) {
               for (const u of urls) {
                 if (!u) continue;
                 try { assertHttpUrl(u); } catch { continue; }
                 if (!seen.has(u)) {
                   seen.add(u);
                   out.push(u);
-                  if (maxUrls > 0 && out.length >= maxUrls) return false;
                 }
               }
-              return true;
             }
 
             const root = await extractFromUrl(sitemapUrl);
 
             if (root.type === "urlset") {
-              await addUrls(root.urls);
+              addUrls(root.urls);
             } else {
               for (const sm of root.sitemaps) {
                 const child = await extractFromUrl(sm);
                 if (child.type !== "urlset") continue;
-                const ok = await addUrls(child.urls);
-                if (!ok) break;
+                addUrls(child.urls);
               }
             }
 
@@ -177,30 +163,34 @@ jobs:
         env:
           SITEMAP_URL_EFFECTIVE: ${{ steps.vars.outputs.sitemap }}
           SINGLE_URL_EFFECTIVE: ${{ steps.vars.outputs.single_url }}
-          MAX_URLS_EFFECTIVE: ${{ steps.vars.outputs.max_urls }}
 
       - name: Prepare report folders
         run: |
-          mkdir -p reports/pa11y
+          mkdir -p reports/pa11y/html
           mkdir -p reports/lighthouse
           mkdir -p reports/meta
 
-      - name: Create Pa11y config from urls.txt
+      - name: Create Pa11y config from urls.txt (reporters write files)
         run: |
           node <<'NODE'
           const fs = require("fs");
 
-          const urls = fs.readFileSync("urls.txt","utf8")
-            .split("\n").map(s=>s.trim()).filter(Boolean);
+          const urls = fs.readFileSync("urls.txt", "utf8")
+            .split("\n").map(s => s.trim()).filter(Boolean);
 
           const cfg = {
+            urls,
             defaults: {
               timeout: 60000,
               chromeLaunchConfig: {
                 args: (process.env.CHROME_FLAGS || "").split(" ").filter(Boolean),
               },
-            },
-            urls
+              reporters: [
+                "cli",
+                ["json", { fileName: "reports/pa11y/pa11y-report.json" }],
+                ["pa11y-ci-reporter-html", { destination: "reports/pa11y/html" }]
+              ]
+            }
           };
 
           fs.writeFileSync(".pa11yci.json", JSON.stringify(cfg, null, 2), "utf8");
@@ -209,7 +199,7 @@ jobs:
         env:
           CHROME_FLAGS: ${{ env.CHROME_FLAGS }}
 
-      - name: Run Pa11y (logs in Actions + files)
+      - name: Run Pa11y (logs in Actions + JSON + HTML outputs)
         shell: bash
         run: |
           set +e
@@ -226,41 +216,24 @@ jobs:
           echo "======================="
 
           echo ""
-          echo "== Running Pa11y JSON =="
-          # stderr is echoed into the Actions log AND saved
-          npx pa11y-ci -c .pa11yci.json --threshold 999999 --reporter json \
-            2> >(tee reports/pa11y/pa11y-json.stderr.log >&2) \
-            | tee reports/pa11y/pa11y-report.json
-          PA11Y_JSON_EXIT=${PIPESTATUS[0]}
-          echo "$PA11Y_JSON_EXIT" > reports/pa11y/pa11y-json.exitcode
-          echo "Pa11y JSON exit code: $PA11Y_JSON_EXIT"
+          echo "== Running Pa11y (single run; reporters write files) =="
+          npx pa11y-ci -c .pa11yci.json --threshold 999999 2>&1 | tee reports/pa11y/pa11y-run.log
+          PA11Y_EXIT=${PIPESTATUS[0]}
+          echo "$PA11Y_EXIT" > reports/pa11y/pa11y.exitcode
+          echo "Pa11y exit code: $PA11Y_EXIT"
 
-          if [ ! -s reports/pa11y/pa11y-report.json ]; then
-            echo "WARNING: pa11y-report.json is empty"
-          else
-            echo "pa11y-report.json size: $(wc -c < reports/pa11y/pa11y-report.json | tr -d ' ') bytes"
+          echo ""
+          echo "== Pa11y outputs check =="
+          echo "JSON:"
+          ls -la reports/pa11y/pa11y-report.json || true
+          if [ -f reports/pa11y/pa11y-report.json ]; then
+            echo "JSON size: $(wc -c < reports/pa11y/pa11y-report.json | tr -d ' ') bytes"
           fi
 
           echo ""
-          echo "== Running Pa11y HTML =="
-          # Do NOT tee HTML to console (can be huge). Still tee stderr so you see real errors.
-          npx pa11y-ci -c .pa11yci.json --threshold 999999 --reporter pa11y-ci-reporter-html \
-            2> >(tee reports/pa11y/pa11y-html.stderr.log >&2) \
-            > reports/pa11y/pa11y-report.html
-          PA11Y_HTML_EXIT=$?
-          echo "$PA11Y_HTML_EXIT" > reports/pa11y/pa11y-html.exitcode
-          echo "Pa11y HTML exit code: $PA11Y_HTML_EXIT"
+          echo "HTML folder:"
+          ls -la reports/pa11y/html || true
 
-          if [ ! -s reports/pa11y/pa11y-report.html ]; then
-            echo "WARNING: pa11y-report.html is empty"
-            echo "Showing last 200 lines of HTML stderr (if any):"
-            tail -n 200 reports/pa11y/pa11y-html.stderr.log || true
-          else
-            echo "pa11y-report.html size: $(wc -c < reports/pa11y/pa11y-report.html | tr -d ' ') bytes"
-          fi
-
-          echo ""
-          echo "Pa11y done (workflow will continue regardless of pa11y exit codes)."
           exit 0
 
       - name: Create Lighthouse CI config from urls.txt
