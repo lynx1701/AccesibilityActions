@@ -209,47 +209,58 @@ jobs:
         env:
           CHROME_FLAGS: ${{ env.CHROME_FLAGS }}
 
-      - name: Run Pa11y (JSON + HTML) and always keep reports
+      - name: Run Pa11y (logs in Actions + files)
+        shell: bash
         run: |
           set +e
+          set -o pipefail
 
-          # JSON
+          echo "== Pa11y diagnostics =="
+          node -v
+          npx --yes pa11y-ci --version || true
+          echo "URLs count: $(wc -l < urls.txt | tr -d ' ')"
+          echo "First 5 URLs:"
+          head -n 5 urls.txt || true
+          echo "Pa11y config:"
+          cat .pa11yci.json || true
+          echo "======================="
+
+          echo ""
+          echo "== Running Pa11y JSON =="
+          # stderr is echoed into the Actions log AND saved
           npx pa11y-ci -c .pa11yci.json --threshold 999999 --reporter json \
-            > reports/pa11y/pa11y-report.json \
-            2> reports/pa11y/pa11y-json.stderr.log
-          PA11Y_JSON_EXIT=$?
+            2> >(tee reports/pa11y/pa11y-json.stderr.log >&2) \
+            | tee reports/pa11y/pa11y-report.json
+          PA11Y_JSON_EXIT=${PIPESTATUS[0]}
           echo "$PA11Y_JSON_EXIT" > reports/pa11y/pa11y-json.exitcode
+          echo "Pa11y JSON exit code: $PA11Y_JSON_EXIT"
 
-          if [ "$PA11Y_JSON_EXIT" -ne 0 ]; then
-            echo "Pa11y JSON exited with code: $PA11Y_JSON_EXIT"
-            if [ -s reports/pa11y/pa11y-json.stderr.log ]; then
-              echo "---- Pa11y JSON stderr (first 200 lines) ----"
-              sed -n '1,200p' reports/pa11y/pa11y-json.stderr.log
-            else
-              echo "---- Pa11y JSON stderr is empty. Showing first 200 lines of stdout file ----"
-              sed -n '1,200p' reports/pa11y/pa11y-report.json || true
-            fi
+          if [ ! -s reports/pa11y/pa11y-report.json ]; then
+            echo "WARNING: pa11y-report.json is empty"
+          else
+            echo "pa11y-report.json size: $(wc -c < reports/pa11y/pa11y-report.json | tr -d ' ') bytes"
           fi
 
-          # HTML
+          echo ""
+          echo "== Running Pa11y HTML =="
+          # Do NOT tee HTML to console (can be huge). Still tee stderr so you see real errors.
           npx pa11y-ci -c .pa11yci.json --threshold 999999 --reporter pa11y-ci-reporter-html \
-            > reports/pa11y/pa11y-report.html \
-            2> reports/pa11y/pa11y-html.stderr.log
+            2> >(tee reports/pa11y/pa11y-html.stderr.log >&2) \
+            > reports/pa11y/pa11y-report.html
           PA11Y_HTML_EXIT=$?
           echo "$PA11Y_HTML_EXIT" > reports/pa11y/pa11y-html.exitcode
+          echo "Pa11y HTML exit code: $PA11Y_HTML_EXIT"
 
-          if [ "$PA11Y_HTML_EXIT" -ne 0 ]; then
-            echo "Pa11y HTML exited with code: $PA11Y_HTML_EXIT"
-            if [ -s reports/pa11y/pa11y-html.stderr.log ]; then
-              echo "---- Pa11y HTML stderr (first 200 lines) ----"
-              sed -n '1,200p' reports/pa11y/pa11y-html.stderr.log
-            else
-              echo "---- Pa11y HTML stderr is empty. (stdout is the HTML report file) ----"
-              echo "HTML report path: reports/pa11y/pa11y-report.html"
-            fi
+          if [ ! -s reports/pa11y/pa11y-report.html ]; then
+            echo "WARNING: pa11y-report.html is empty"
+            echo "Showing last 200 lines of HTML stderr (if any):"
+            tail -n 200 reports/pa11y/pa11y-html.stderr.log || true
+          else
+            echo "pa11y-report.html size: $(wc -c < reports/pa11y/pa11y-report.html | tr -d ' ') bytes"
           fi
 
-          # Never fail the workflow on pa11y (we want the monthly artifact no matter what)
+          echo ""
+          echo "Pa11y done (workflow will continue regardless of pa11y exit codes)."
           exit 0
 
       - name: Create Lighthouse CI config from urls.txt
