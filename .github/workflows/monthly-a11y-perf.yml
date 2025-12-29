@@ -221,15 +221,26 @@ jobs:
         env:
           CHROME_FLAGS: ${{ env.CHROME_FLAGS }}
 
-      - name: Run Pa11y (JSON)
-        continue-on-error: true
+      - name: Run Pa11y (JSON + HTML) and always keep reports
         run: |
-          npx pa11y-ci -c .pa11yci.json --reporter json > reports/pa11y/pa11y-report.json
+          set +e
 
-      - name: Run Pa11y (HTML)
-        continue-on-error: true
-        run: |
-          npx pa11y-ci -c .pa11yci.json --reporter pa11y-ci-reporter-html > reports/pa11y/pa11y-report.html
+          # JSON report (stdout -> file, stderr -> log)
+          npx pa11y-ci -c .pa11yci.json --threshold 999999 --reporter json \
+            > reports/pa11y/pa11y-report.json \
+            2> reports/pa11y/pa11y-json.stderr.log
+          echo $? > reports/pa11y/pa11y-json.exitcode
+
+          # HTML report (stdout -> file, stderr -> log)
+          npx pa11y-ci -c .pa11yci.json --threshold 999999 --reporter pa11y-ci-reporter-html \
+            > reports/pa11y/pa11y-report.html \
+            2> reports/pa11y/pa11y-html.stderr.log
+          echo $? > reports/pa11y/pa11y-html.exitcode
+
+          set -e
+
+          # Never fail the workflow on pa11y (we want the monthly artifact no matter what)
+          exit 0
 
       - name: Create Lighthouse CI config from urls.txt
         run: |
@@ -250,7 +261,6 @@ jobs:
                   chromeFlags
                 }
               },
-              // This creates a nice folder of HTML reports + a manifest
               upload: {
                 target: "filesystem",
                 outputDir: "reports/lighthouse"
@@ -318,6 +328,8 @@ jobs:
                 <ul>
                   <li><a href="${pa11yHtml}">HTML report</a></li>
                   <li><a href="pa11y/pa11y-report.json">JSON report</a></li>
+                  <li><a href="pa11y/pa11y-json.stderr.log">JSON stderr log</a></li>
+                  <li><a href="pa11y/pa11y-html.stderr.log">HTML stderr log</a></li>
                 </ul>
               </div>
 
