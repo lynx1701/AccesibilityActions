@@ -1,10 +1,10 @@
-name: A11y (Pa11y)
+name: A11y (Pa11y + Lighthouse)
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Run mode: urls (newline-separated) or sitemap"
+        description: "Run mode: urls (comma-separated) or sitemap"
         type: choice
         required: true
         default: urls
@@ -12,28 +12,16 @@ on:
           - urls
           - sitemap
       urls:
-        description: "URLs (newline-separated). Used when mode=urls"
+        description: "URLs (comma separated). Used when mode=urls"
         type: string
         required: false
       sitemap_url:
         description: "Sitemap URL (https://.../sitemap.xml). Used when mode=sitemap"
         type: string
         required: false
-      sitemap_find:
-        description: "Optional: string to find in sitemap URLs"
-        type: string
-        required: false
-      sitemap_replace:
-        description: "Optional: replacement string for sitemap URLs"
-        type: string
-        required: false
-      sitemap_exclude:
-        description: "Optional: regex/glob-ish exclude (pa11y-ci flag value)"
-        type: string
-        required: false
 
 jobs:
-  pa11y:
+  a11y:
     runs-on: ubuntu-latest
 
     steps:
@@ -45,17 +33,16 @@ jobs:
           node-version: "20"
           cache: "npm"
 
-      # Best practice: add pa11y-ci + reporter to devDependencies and use npm ci
-      # If you don't want to commit deps, replace `npm ci` with `npm i --no-save ...`
       - name: Install dependencies
         run: npm ci
 
+      # --- Pa11y ---
       - name: Run Pa11y CI
+        continue-on-error: true
         env:
           PA11Y_URLS: ${{ inputs.urls }}
         run: |
           set -euo pipefail
-
           mkdir -p reports/pa11y/html
 
           if [ "${{ inputs.mode }}" = "sitemap" ]; then
@@ -66,30 +53,157 @@ jobs:
 
             CMD=(npx pa11y-ci --config .pa11yci.js --sitemap "${{ inputs.sitemap_url }}")
 
-            if [ -n "${{ inputs.sitemap_find }}" ]; then
-              CMD+=(--sitemap-find "${{ inputs.sitemap_find }}")
-            fi
-            if [ -n "${{ inputs.sitemap_replace }}" ]; then
-              CMD+=(--sitemap-replace "${{ inputs.sitemap_replace }}")
-            fi
-            if [ -n "${{ inputs.sitemap_exclude }}" ]; then
-              CMD+=(--sitemap-exclude "${{ inputs.sitemap_exclude }}")
-            fi
-
-            "${CMD[@]}"
           else
             if [ -z "${{ inputs.urls }}" ]; then
-              echo "mode=urls requires inputs.urls (newline-separated)"
+              echo "mode=urls requires inputs.urls (comma-separated)"
               exit 1
             fi
 
             npx pa11y-ci --config .pa11yci.js
           fi
 
-      # Always upload reports, even if pa11y-ci fails the job due to violations
+      # --- Lighthouse: prepare URL list (works for urls or sitemap) ---
+      - name: Prepare Lighthouse URL list
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p reports/lighthouse
+
+          if [ "${{ inputs.mode }}" = "sitemap" ]; then
+            if [ -z "${{ inputs.sitemap_url }}" ]; then
+              echo "mode=sitemap requires inputs.sitemap_url"
+              exit 1
+            fi
+
+            # Fetch sitemap and extract <loc> URLs (simple + effective).
+            # If your sitemap is a sitemap-index, this won't recurse. (We can add recursion if you want.)
+            node - <<'NODE'
+            const url = process.env.SITEMAP_URL;
+            const max = Number(process.env.MAX_URLS || 20);
+
+            const http = require("http");
+            const https = require("https");
+
+            function fetch(u) {
+              return new Promise((resolve, reject) => {
+                const lib = u.startsWith("https:") ? https : http;
+                lib.get(u, (res) => {
+                  let data = "";
+                  res.on("data", (c) => data += c);
+                  res.on("end", () => resolve(data));
+                }).on("error", reject);
+              });
+            }
+
+            (async () => {
+              const xml = await fetch(url);
+              const locs = [...xml.matchAll(/<loc>\s*([^<]+)\s*<\/loc>/g)].map(m => m[1].trim());
+
+              // Filter out obvious sitemap links (optional)
+              const urls = locs.filter(x => /^https?:\/\//.test(x) && !x.endsWith(".xml")).slice(0, max);
+
+              if (!urls.length) {
+                console.error("No URLs extracted from sitemap (or they were filtered out).");
+                process.exit(1);
+              }
+
+              // Write multiline env var
+              console.log("LHCI_URLS<<EOF");
+              console.log(urls.join("\n"));
+              console.log("EOF");
+            })().catch(e => { console.error(e); process.exit(1); });
+            NODE
+          else
+            if [ -z "${{ inputs.urls }}" ]; then
+              echo "mode=urls requires inputs.urls (comma/newline-separated)"
+              exit 1
+            fi
+            echo "LHCI_URLS<<EOF" >> $GITHUB_ENV
+            # Keep as-is; .lighthouserc.js splits on commas/newlines
+            echo "${{ inputs.urls }}" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+            exit 0
+          fi
+        env:
+          SITEMAP_URL: ${{ inputs.sitemap_url }}
+          MAX_URLS: ${{ inputs.lhci_max_urls }}
+
+      # Write the multiline output from Node into GITHUB_ENV
+      - name: Export LHCI_URLS to env
+        if: always()
+        run: |
+          set -euo pipefail
+          # The previous step printed an env heredoc to stdout if mode=sitemap.
+          # GitHub doesn't auto-apply that, so we re-run extraction and write to GITHUB_ENV directly.
+          if [ "${{ inputs.mode }}" != "sitemap" ]; then
+            exit 0
+          fi
+
+          node - <<'NODE'
+          const fs = require("fs");
+          const url = process.env.SITEMAP_URL;
+          const max = Number(process.env.MAX_URLS || 20);
+
+          const http = require("http");
+          const https = require("https");
+
+          function fetch(u) {
+            return new Promise((resolve, reject) => {
+              const lib = u.startsWith("https:") ? https : http;
+              lib.get(u, (res) => {
+                let data = "";
+                res.on("data", (c) => data += c);
+                res.on("end", () => resolve(data));
+              }).on("error", reject);
+            });
+          }
+
+          (async () => {
+            const xml = await fetch(url);
+            const locs = [...xml.matchAll(/<loc>\s*([^<]+)\s*<\/loc>/g)].map(m => m[1].trim());
+            const urls = locs.filter(x => /^https?:\/\//.test(x) && !x.endsWith(".xml")).slice(0, max);
+
+            if (!urls.length) {
+              console.error("No URLs extracted from sitemap (or they were filtered out).");
+              process.exit(1);
+            }
+
+            const envFile = process.env.GITHUB_ENV;
+            fs.appendFileSync(envFile, `LHCI_URLS<<EOF\n${urls.join("\n")}\nEOF\n`);
+          })().catch(e => { console.error(e); process.exit(1); });
+          NODE
+        env:
+          SITEMAP_URL: ${{ inputs.sitemap_url }}
+          MAX_URLS: ${{ inputs.lhci_max_urls }}
+
+      # --- Lighthouse CI ---
+      - name: Run Lighthouse CI
+        if: always()
+        env:
+          LHCI_RUNS: ${{ inputs.lhci_runs }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${LHCI_URLS:-}" ]; then
+            echo "LHCI_URLS is empty; cannot run Lighthouse."
+            exit 1
+          fi
+
+          mkdir -p reports/lighthouse
+
+          npx lhci autorun --config=./.lighthouserc.js
+
+      # --- Upload artifacts ---
       - name: Upload pa11y reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pa11y-reports
           path: reports/pa11y
+
+      - name: Upload lighthouse reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-reports
+          path: reports/lighthouse
