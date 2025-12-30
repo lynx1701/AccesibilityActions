@@ -9,6 +9,7 @@ module.exports = {
   defaults: {
     timeout: 60000,
     concurrency: 2,
+    useIncognitoBrowserContext: false,
     chromeLaunchConfig: {
       args: [
         "--no-sandbox",
