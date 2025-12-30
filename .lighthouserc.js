@@ -14,13 +14,12 @@ module.exports = {
         chromeFlags: ["--no-sandbox", "--disable-dev-shm-usage"],
       },
     },
-    // Optional: if you want it NOT to fail the job on scores, comment this entire assert block.
-    //   assert: {
-    //     preset: "lighthouse:recommended"
-    //   },
-    //   upload: {
-    //     target: "filesystem",
-    //     outputDir: "reports/lighthouse"
-    //   }
+    assert: {
+      preset: "lighthouse:recommended",
+    },
+    upload: {
+      target: "filesystem",
+      outputDir: "reports/lighthouse",
+    },
   },
 };
